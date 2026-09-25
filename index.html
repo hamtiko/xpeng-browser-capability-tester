@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>XPeng Browser Capability Tester</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, sans-serif; background: #101827; color: #eef4ff; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 20px; line-height: 1.45; }
+    main { max-width: 920px; margin: auto; }
+    h1 { font-size: 1.65rem; margin: 0 0 5px; }
+    h2 { font-size: 1.15rem; margin: 0 0 12px; }
+    p { color: #afbdd2; margin: 5px 0 15px; }
+    section { background: #1b2940; border: 1px solid #334862; border-radius: 14px; padding: 17px; margin: 16px 0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+    .item { padding: 10px; border-radius: 9px; background: #142238; overflow-wrap: anywhere; }
+    .label { color: #aebed4; font-size: .85rem; }
+    .value { margin-top: 3px; white-space: pre-wrap; }
+    .yes { color: #7de5ac; } .no { color: #ff9f98; } .maybe { color: #ffda87; }
+    button { cursor: pointer; color: #fff; background: #246bd1; border: 0; border-radius: 9px; padding: 11px 14px; margin: 4px 5px 4px 0; font: inherit; min-height: 44px; }
+    button:focus-visible { outline: 3px solid #ffda87; }
+    button.secondary { background: #354d6c; }
+    pre { background: #0e1929; color: #d5e3f6; border-radius: 9px; padding: 12px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+    small { color: #aebed4; }
+  </style>
+</head>
+<body>
+<main>
+  <header><h1>XPeng Browser Capability Tester</h1><p>Open this page in the car browser. Automatic checks run on load; permission prompts only appear when you tap a test.</p></header>
+  <section><h2>Environment</h2><div id="environment" class="grid"></div></section>
+  <section><h2>Browser APIs</h2><div id="capabilities" class="grid"></div></section>
+  <section><h2>Possible native bridges</h2><p>Lists matching global object names and their property names. It never calls bridge methods.</p><div id="bridges" class="grid"></div></section>
+  <section><h2>Interactive tests</h2><p>These tests may request access from the browser. The WebSocket test connects to a public echo service; other tests run locally.</p>
+    <button type="button" data-test="location">Get location</button>
+    <button type="button" data-test="notifications">Notification permission</button>
+    <button type="button" data-test="clipboard">Read clipboard</button>
+    <button type="button" data-test="camera">Camera / microphone</button>
+    <button type="button" data-test="bluetooth">Bluetooth devices</button>
+    <button type="button" data-test="usb">USB devices</button>
+    <button type="button" data-test="storage">Storage write / read</button>
+    <button type="button" data-test="websocket">WebSocket construction</button>
+    <div id="test-results" class="grid" aria-live="polite"></div>
+  </section>
+  <section><h2>Log and export</h2><button type="button" id="export">Export JSON</button><button type="button" id="copy" class="secondary">Copy JSON</button><button type="button" id="refresh" class="secondary">Rescan</button><pre id="log" aria-live="polite"></pre><small>Exported results can contain your user agent, device details, and location if you ran the location test. Review before sharing.</small></section>
+</main>
+<script>
+(function () {
+  'use strict';
+  var report = { app: 'XPeng Browser Capability Tester', generatedAt: '', environment: {}, capabilities: {}, bridges: [], tests: {}, log: [] };
+  var $ = function (id) { return document.getElementById(id); };
+  function safe(fn) { try { return fn(); } catch (e) { return 'Error: ' + String(e && e.message || e); } }
+  function show(container, label, value, kind) {
+    var card = document.createElement('div'), a = document.createElement('div'), b = document.createElement('div');
+    card.className = 'item'; a.className = 'label'; b.className = 'value' + (kind ? ' ' + kind : '');
+    a.textContent = label; b.textContent = String(value); card.appendChild(a); card.appendChild(b); container.appendChild(card);
+  }
+  function log(message) { report.log.push(new Date().toISOString() + ' ' + message); $('log').textContent = report.log.join('\n'); }
+  function present(name, value) { report.capabilities[name] = !!value; show($('capabilities'), name, value ? 'Available' : 'Unavailable', value ? 'yes' : 'no'); }
+  function scan() {
+    report.generatedAt = new Date().toISOString(); report.environment = {}; report.capabilities = {}; report.bridges = [];
+    $('environment').textContent = ''; $('capabilities').textContent = ''; $('bridges').textContent = '';
+    var n = navigator, env = report.environment;
+    env.userAgent = n.userAgent || ''; env.platform = n.platform || ''; env.language = n.language || '';
+    env.languages = safe(function () { return Array.prototype.slice.call(n.languages || []); });
+    env.viewport = innerWidth + ' × ' + innerHeight; env.screen = screen.width + ' × ' + screen.height;
+    env.pixelRatio = window.devicePixelRatio || 1; env.touchPoints = n.maxTouchPoints || 0;
+    env.online = n.onLine; env.timezone = safe(function () { return Intl.DateTimeFormat().resolvedOptions().timeZone; });
+    env.secureContext = !!window.isSecureContext; env.referrer = document.referrer || '';
+    Object.keys(env).forEach(function (key) { show($('environment'), key, typeof env[key] === 'object' ? JSON.stringify(env[key]) : env[key]); });
+    present('Geolocation', !!n.geolocation); present('Permissions API', !!n.permissions);
+    present('Service workers', !!n.serviceWorker); present('WebRTC', !!(window.RTCPeerConnection || window.webkitRTCPeerConnection));
+    present('WebSocket', !!window.WebSocket); present('Web Bluetooth', !!n.bluetooth);
+    present('WebUSB', !!n.usb); present('Clipboard', !!n.clipboard);
+    present('Notifications', !!window.Notification); present('Media devices', !!(n.mediaDevices && n.mediaDevices.getUserMedia));
+    present('Local storage', safe(function () { return !!window.localStorage; }) === true);
+    present('IndexedDB', !!window.indexedDB); present('Web Share', !!n.share);
+    present('Speech synthesis', !!window.speechSynthesis); present('Web Speech recognition', !!(window.SpeechRecognition || window.webkitSpeechRecognition));
+    present('Vibration', !!n.vibrate); present('Gamepad', !!n.getGamepads);
+    present('WebGL', safe(function () { var c = document.createElement('canvas'); return !!(c.getContext('webgl') || c.getContext('experimental-webgl')); }) === true);
+    var names = ['Android', 'webkit', 'chrome', 'xpeng', 'XPeng', 'Xpeng', 'XPERI', 'nativeBridge', 'NativeBridge', 'JSBridge', 'WebViewJavascriptBridge', 'WeixinJSBridge', 'ReactNativeWebView'];
+    safe(function () { Object.getOwnPropertyNames(window).forEach(function (key) { if (/xpeng|xos|javascriptinterface|nativebridge|jsbridge/i.test(key) && names.indexOf(key) < 0) names.push(key); }); });
+    names.forEach(function (name) {
+      var value = safe(function () { return window[name]; });
+      if (value == null || typeof value === 'string' && value.indexOf('Error:') === 0) return;
+      var type = typeof value;
+      var properties = type === 'object' || type === 'function' ? safe(function () { return Object.getOwnPropertyNames(value).slice(0, 60); }) : [];
+      var entry = { name: name, type: type, properties: properties };
+      report.bridges.push(entry); show($('bridges'), name, type + (Array.isArray(properties) && properties.length ? ': ' + properties.join(', ') : ''));
+    });
+    if (!report.bridges.length) show($('bridges'), 'Scan', 'No matching global names found', 'maybe');
+    log('Automatic scan completed');
+  }
+  function result(name, value) { report.tests[name] = { at: new Date().toISOString(), result: value }; $('test-results').textContent = ''; Object.keys(report.tests).forEach(function (key) { show($('test-results'), key, JSON.stringify(report.tests[key].result)); }); log(name + ': ' + JSON.stringify(value)); }
+  function error(e) { return String(e && (e.message || e.name) || e); }
+  function test(name) {
+    log('Started ' + name);
+    try {
+      if (name === 'location') {
+        if (!navigator.geolocation) throw Error('Geolocation unavailable');
+        navigator.geolocation.getCurrentPosition(function (p) { result(name, { latitude: p.coords.latitude, longitude: p.coords.longitude, accuracyMeters: p.coords.accuracy }); }, function (e) { result(name, { error: error(e), code: e.code }); }, { timeout: 12000 });
+      } else if (name === 'notifications') {
+        if (!window.Notification) throw Error('Notifications unavailable');
+        var permission = Notification.requestPermission();
+        if (permission && typeof permission.then === 'function') permission.then(function (v) { result(name, v); }).catch(function (e) { result(name, error(e)); });
+        else result(name, permission || Notification.permission);
+      } else if (name === 'clipboard') {
+        if (!navigator.clipboard || !navigator.clipboard.readText) throw Error('Clipboard read unavailable');
+        navigator.clipboard.readText().then(function (v) { result(name, { readable: true, length: v.length, preview: v.slice(0, 80) }); }).catch(function (e) { result(name, error(e)); });
+      } else if (name === 'camera') {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw Error('Media devices unavailable');
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(function (stream) { var tracks = stream.getTracks().map(function (t) { return t.kind; }); stream.getTracks().forEach(function (t) { t.stop(); }); result(name, { acquiredTracks: tracks, stopped: true }); }).catch(function (e) { result(name, error(e)); });
+      } else if (name === 'bluetooth') {
+        if (!navigator.bluetooth || !navigator.bluetooth.requestDevice) throw Error('Web Bluetooth unavailable');
+        navigator.bluetooth.requestDevice({ acceptAllDevices: true }).then(function (device) { result(name, { id: device.id, name: device.name || '' }); }).catch(function (e) { result(name, error(e)); });
+      } else if (name === 'usb') {
+        if (!navigator.usb || !navigator.usb.requestDevice) throw Error('WebUSB unavailable');
+        navigator.usb.requestDevice({ filters: [] }).then(function (device) { result(name, { productName: device.productName || '', vendorId: device.vendorId }); }).catch(function (e) { result(name, error(e)); });
+      } else if (name === 'storage') {
+        var key = 'xpeng-capability-test'; localStorage.setItem(key, 'ok'); var value = localStorage.getItem(key); localStorage.removeItem(key); result(name, { roundTrip: value === 'ok' });
+      } else if (name === 'websocket') {
+        if (!window.WebSocket) throw Error('WebSocket unavailable');
+        var socket = new WebSocket('wss://echo.websocket.events');
+        var done = false; var timer = setTimeout(function () { if (!done) { done = true; result(name, 'Timed out'); socket.close(); } }, 6000);
+        function finish(value) { if (!done) { done = true; clearTimeout(timer); result(name, value); socket.close(); } }
+        socket.onopen = function () { finish('Connected'); }; socket.onerror = function () { finish('Connection failed'); };
+      }
+    } catch (e) { result(name, { error: error(e) }); }
+  }
+  document.querySelectorAll('[data-test]').forEach(function (button) { button.addEventListener('click', function () { test(button.getAttribute('data-test')); }); });
+  $('refresh').addEventListener('click', scan);
+  $('export').addEventListener('click', function () { var blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }); var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'xpeng-browser-report.json'; document.body.appendChild(a); a.click(); setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000); });
+  $('copy').addEventListener('click', function () { var data = JSON.stringify(report, null, 2); if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(data).then(function () { log('JSON copied'); }).catch(function (e) { log('Copy failed: ' + error(e)); }); else log('Clipboard write unavailable; use Export JSON'); });
+  scan();
+}());
+</script>
+</body>
+</html>
