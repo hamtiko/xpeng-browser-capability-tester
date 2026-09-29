@@ -23,6 +23,15 @@
     button.secondary { background: #354d6c; }
     pre { background: #0e1929; color: #d5e3f6; border-radius: 9px; padding: 12px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
     small { color: #aebed4; }
+    #native-discovery button { min-height: 52px; }
+    #native-discovery h3 { font-size: 1rem; margin: 20px 0 10px; }
+    #native-discovery details { margin: 8px 0; border: 1px solid #334862; border-radius: 9px; padding: 0 12px; }
+    #native-discovery summary { min-height: 48px; padding: 12px 0; cursor: pointer; overflow-wrap: anywhere; }
+    #native-discovery summary:focus-visible, #native-full-report:focus-visible { outline: 3px solid #ffda87; }
+    #native-results > .item { margin: 10px 0; }
+    #native-status { padding: 8px 0; }
+    #native-full-report { width: 100%; min-height: 220px; background: #0e1929; color: #d5e3f6; border: 1px solid #334862; border-radius: 9px; padding: 12px; font: 13px/1.5 monospace; }
+    @media (max-width: 500px) { #native-discovery button { width: 100%; margin: 5px 0; } }
   </style>
 </head>
 <body>
@@ -31,6 +40,20 @@
   <section><h2>Environment</h2><div id="environment" class="grid"></div></section>
   <section><h2>Browser APIs</h2><div id="capabilities" class="grid"></div></section>
   <section><h2>Possible native bridges</h2><p>Lists matching global object names and their property names. It never calls bridge methods.</p><div id="bridges" class="grid"></div></section>
+  <section id="native-discovery" aria-labelledby="native-title">
+    <h2 id="native-title">XPENG Native API Discovery</h2>
+    <p>Look for proprietary objects, bridge interfaces, and WebView clues. Discovery never calls unknown functions, evaluates unknown getters, sends native messages, or opens custom URLs.</p>
+    <button type="button" id="run-native">Run XPENG Discovery</button>
+    <button type="button" id="copy-full-report" class="secondary">Copy Full Report</button>
+    <p id="native-status" role="status" aria-live="polite">Ready · Run discovery to inspect this browser.</p>
+    <small>PASS = inspection completed. FOUND = exposed, not proof of vehicle access. NOT FOUND = not exposed by this check. ERROR = an inspection failed; other results remain available. Accessors are listed without evaluating them.</small>
+    <div id="native-results"></div>
+    <div id="native-report-panel" hidden>
+      <h3>Full report · copy fallback</h3>
+      <p>Copy this text if the clipboard API is unavailable. It includes the page URL and any earlier interactive test results; review before sharing.</p>
+      <textarea id="native-full-report" aria-label="Full capability and native discovery report" readonly spellcheck="false"></textarea>
+    </div>
+  </section>
   <section><h2>Interactive tests</h2><p>These tests may request access from the browser. The WebSocket test connects to a public echo service; other tests run locally.</p>
     <button type="button" data-test="location">Get location</button>
     <button type="button" data-test="notifications">Notification permission</button>
@@ -78,15 +101,11 @@
     present('Speech synthesis', !!window.speechSynthesis); present('Web Speech recognition', !!(window.SpeechRecognition || window.webkitSpeechRecognition));
     present('Vibration', !!n.vibrate); present('Gamepad', !!n.getGamepads);
     present('WebGL', safe(function () { var c = document.createElement('canvas'); return !!(c.getContext('webgl') || c.getContext('experimental-webgl')); }) === true);
-    var names = ['Android', 'webkit', 'chrome', 'xpeng', 'XPeng', 'Xpeng', 'XPERI', 'nativeBridge', 'NativeBridge', 'JSBridge', 'WebViewJavascriptBridge', 'WeixinJSBridge', 'ReactNativeWebView'];
-    safe(function () { Object.getOwnPropertyNames(window).forEach(function (key) { if (/xpeng|xos|javascriptinterface|nativebridge|jsbridge/i.test(key) && names.indexOf(key) < 0) names.push(key); }); });
-    names.forEach(function (name) {
-      var value = safe(function () { return window[name]; });
-      if (value == null || typeof value === 'string' && value.indexOf('Error:') === 0) return;
-      var type = typeof value;
-      var properties = type === 'object' || type === 'function' ? safe(function () { return Object.getOwnPropertyNames(value).slice(0, 60); }) : [];
-      var entry = { name: name, type: type, properties: properties };
-      report.bridges.push(entry); show($('bridges'), name, type + (Array.isArray(properties) && properties.length ? ': ' + properties.join(', ') : ''));
+    var passiveBridges = nativeDiscovery.legacyBridgeScan();
+    report.bridges = passiveBridges.objects;
+    report.bridgeInspectionErrors = passiveBridges.errors;
+    report.bridges.forEach(function (entry) {
+      show($('bridges'), entry.name, entry.status + ' · ' + entry.typeof + (entry.introspection && entry.introspection.own ? ': ' + entry.introspection.own.names.join(', ') : ''));
     });
     if (!report.bridges.length) show($('bridges'), 'Scan', 'No matching global names found', 'maybe');
     log('Automatic scan completed');
@@ -131,6 +150,355 @@
   $('refresh').addEventListener('click', scan);
   $('export').addEventListener('click', function () { var blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }); var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'xpeng-browser-report.json'; document.body.appendChild(a); a.click(); setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000); });
   $('copy').addEventListener('click', function () { var data = JSON.stringify(report, null, 2); if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(data).then(function () { log('JSON copied'); }).catch(function (e) { log('Copy failed: ' + error(e)); }); else log('Clipboard write unavailable; use Export JSON'); });
+  // Native discovery only reflects descriptors. Never retain raw host objects in reports.
+  function createNativeDiscovery() {
+    var own = Object.getOwnPropertyNames, descriptor = Object.getOwnPropertyDescriptor;
+    var prototype = Object.getPrototypeOf, hasOwn = Object.prototype.hasOwnProperty;
+    var explicit = ['xpeng', 'XPeng', 'Xpeng', 'car', 'vehicle', 'Android', 'JSBridge', 'WebViewJavascriptBridge', 'bridge', 'native', 'Native', 'webkit', 'XPERI', 'nativeBridge', 'NativeBridge', 'WeixinJSBridge', 'ReactNativeWebView', 'cordova', 'qt', 'QWebChannel', 'chrome', 'cef'];
+    var nativePattern = /xpeng|xmart|xpilot|(^|_)xos($|_)|vehicle|native|bridge|javascriptinterface|webview|cordova|qwebchannel|^android$|^car$/i;
+    // A versioned, intentionally incomplete baseline, not a native-API allowlist.
+    // Unknown names stay visible, including standard APIs added after this list.
+    var common = (
+      'Object Function Array Number parseFloat parseInt Infinity NaN undefined Boolean String Symbol Date Promise RegExp Error AggregateError EvalError RangeError ReferenceError SyntaxError TypeError URIError globalThis JSON Math Intl Reflect Proxy console ' +
+      'ArrayBuffer SharedArrayBuffer DataView Int8Array Uint8Array Uint8ClampedArray Int16Array Uint16Array Int32Array Uint32Array Float16Array Float32Array Float64Array BigInt BigInt64Array BigUint64Array Map Set WeakMap WeakSet WeakRef FinalizationRegistry Atomics WebAssembly Iterator ' +
+      'eval isFinite isNaN decodeURI decodeURIComponent encodeURI encodeURIComponent escape unescape window self document name location customElements history navigation locationbar menubar personalbar scrollbars statusbar toolbar status closed frames length top opener parent frameElement navigator clientInformation origin external screen visualViewport innerWidth innerHeight scrollX pageXOffset scrollY pageYOffset screenX screenY outerWidth outerHeight devicePixelRatio screenLeft screenTop event performance isSecureContext crossOriginIsolated scheduler chrome trustedTypes speechSynthesis ' +
+      'alert atob blur btoa cancelAnimationFrame cancelIdleCallback captureEvents clearInterval clearTimeout close confirm createImageBitmap fetch find focus getComputedStyle getSelection matchMedia moveBy moveTo open postMessage print prompt queueMicrotask releaseEvents reportError requestAnimationFrame requestIdleCallback resizeBy resizeTo scroll scrollBy scrollTo setInterval setTimeout stop structuredClone webkitCancelAnimationFrame webkitRequestAnimationFrame webkitRequestFileSystem webkitResolveLocalFileSystemURL addEventListener removeEventListener dispatchEvent ' +
+      'localStorage sessionStorage indexedDB caches cookieStore crypto credentialless originAgentCluster launchQueue sharedStorage fence documentPictureInPicture TEMPORARY PERSISTENT ' +
+      'Window WindowProperties EventTarget Event CustomEvent UIEvent MouseEvent PointerEvent TouchEvent KeyboardEvent WheelEvent InputEvent FocusEvent DragEvent ClipboardEvent CompositionEvent ProgressEvent ErrorEvent MessageEvent CloseEvent StorageEvent HashChangeEvent PopStateEvent BeforeUnloadEvent PageTransitionEvent PromiseRejectionEvent SecurityPolicyViolationEvent AnimationEvent TransitionEvent SubmitEvent ToggleEvent Touch TouchList ' +
+      'Node Element Document HTMLDocument XMLDocument DocumentFragment DocumentType ShadowRoot CharacterData Text Comment CDATASection ProcessingInstruction Attr NodeList HTMLCollection NamedNodeMap DOMTokenList DOMStringList DOMStringMap DOMImplementation DOMParser XMLSerializer XPathEvaluator XPathExpression XPathResult XSLTProcessor Range StaticRange AbstractRange Selection TreeWalker NodeIterator MutationObserver MutationRecord IntersectionObserver IntersectionObserverEntry ResizeObserver ResizeObserverEntry ResizeObserverSize ' +
+      'CSS CSSStyleDeclaration CSSStyleSheet StyleSheet StyleSheetList CSSRule CSSRuleList CSSStyleRule CSSMediaRule CSSSupportsRule CSSImportRule CSSFontFaceRule CSSKeyframesRule CSSKeyframeRule CSSNamespaceRule CSSPageRule MediaList MediaQueryList MediaQueryListEvent CSSGroupingRule CSSConditionRule CSSLayerBlockRule CSSLayerStatementRule CSSContainerRule CSSScopeRule CSSStartingStyleRule CSSPropertyRule CSSFontPaletteValuesRule CSSCounterStyleRule CSSPositionTryRule CSSNestedDeclarations ' +
+      'CSSStyleValue CSSKeywordValue CSSNumericValue CSSUnitValue CSSMathValue CSSMathSum CSSMathProduct CSSMathNegate CSSMathInvert CSSMathMin CSSMathMax CSSMathClamp CSSUnparsedValue CSSVariableReferenceValue CSSTransformValue CSSTransformComponent CSSTranslate CSSRotate CSSScale CSSSkew CSSSkewX CSSSkewY CSSPerspective CSSMatrixComponent StylePropertyMap StylePropertyMapReadOnly ' +
+      'DOMRect DOMRectReadOnly DOMPoint DOMPointReadOnly DOMQuad DOMMatrix DOMMatrixReadOnly WebKitCSSMatrix DOMException DOMRectList DOMStringList DOMStringMap ' +
+      'HTMLElement HTMLAnchorElement HTMLAreaElement HTMLAudioElement HTMLBRElement HTMLBaseElement HTMLBodyElement HTMLButtonElement HTMLCanvasElement HTMLDListElement HTMLDataElement HTMLDataListElement HTMLDetailsElement HTMLDialogElement HTMLDirectoryElement HTMLDivElement HTMLEmbedElement HTMLFieldSetElement HTMLFontElement HTMLFormControlsCollection HTMLFormElement HTMLFrameElement HTMLFrameSetElement HTMLHRElement HTMLHeadElement HTMLHeadingElement HTMLHtmlElement HTMLIFrameElement HTMLImageElement HTMLInputElement HTMLLIElement HTMLLabelElement HTMLLegendElement HTMLLinkElement HTMLMapElement HTMLMarqueeElement HTMLMediaElement HTMLMenuElement HTMLMetaElement HTMLMeterElement HTMLModElement HTMLOListElement HTMLObjectElement HTMLOptGroupElement HTMLOptionElement HTMLOptionsCollection HTMLOutputElement HTMLParagraphElement HTMLParamElement HTMLPictureElement HTMLPreElement HTMLProgressElement HTMLQuoteElement HTMLScriptElement HTMLSelectElement HTMLSlotElement HTMLSourceElement HTMLSpanElement HTMLStyleElement HTMLTableCaptionElement HTMLTableCellElement HTMLTableColElement HTMLTableElement HTMLTableRowElement HTMLTableSectionElement HTMLTemplateElement HTMLTextAreaElement HTMLTimeElement HTMLTitleElement HTMLTrackElement HTMLUListElement HTMLUnknownElement HTMLVideoElement Image Audio Option ' +
+      'SVGElement SVGGraphicsElement SVGGeometryElement SVGSVGElement SVGPathElement SVGRectElement SVGCircleElement SVGEllipseElement SVGLineElement SVGPolygonElement SVGPolylineElement SVGTextElement SVGTextContentElement SVGTextPositioningElement SVGTSpanElement SVGTextPathElement SVGGElement SVGDefsElement SVGUseElement SVGSymbolElement SVGImageElement SVGForeignObjectElement SVGTransform SVGTransformList SVGLength SVGLengthList SVGNumber SVGNumberList SVGPoint SVGPointList SVGRect SVGAngle SVGMatrix SVGAnimatedLength SVGAnimatedLengthList SVGAnimatedNumber SVGAnimatedNumberList SVGAnimatedString SVGAnimatedBoolean SVGAnimatedEnumeration SVGAnimatedInteger SVGAnimatedRect SVGAnimatedAngle SVGAnimatedTransformList SVGPreserveAspectRatio SVGAnimatedPreserveAspectRatio SVGUnitTypes ' +
+      'Navigator NavigatorUAData NetworkInformation Screen ScreenOrientation VisualViewport BarProp Location History Navigation NavigationHistoryEntry NavigationTransition NavigateEvent NavigationCurrentEntryChangeEvent CustomElementRegistry ' +
+      'URL URLSearchParams URLPattern Blob File FileList FileReader FileSystem FileSystemHandle FileSystemFileHandle FileSystemDirectoryHandle FileSystemWritableFileStream FileSystemEntry FileSystemDirectoryEntry FileSystemFileEntry FileSystemDirectoryReader FileSystemObserver FileSystemChangeRecord FormData Headers Request Response XMLHttpRequest XMLHttpRequestEventTarget XMLHttpRequestUpload WebSocket WebSocketStream EventSource AbortController AbortSignal ReadableStream ReadableStreamDefaultReader ReadableStreamBYOBReader ReadableStreamBYOBRequest ReadableStreamDefaultController ReadableByteStreamController WritableStream WritableStreamDefaultWriter WritableStreamDefaultController TransformStream TransformStreamDefaultController TextEncoder TextDecoder TextEncoderStream TextDecoderStream CompressionStream DecompressionStream ByteLengthQueuingStrategy CountQueuingStrategy ' +
+      'Worker SharedWorker ServiceWorker ServiceWorkerContainer ServiceWorkerRegistration MessageChannel MessagePort BroadcastChannel Worklet Cache CacheStorage Storage StorageManager IDBFactory IDBDatabase IDBTransaction IDBRequest IDBOpenDBRequest IDBCursor IDBCursorWithValue IDBIndex IDBObjectStore IDBKeyRange IDBVersionChangeEvent Crypto CryptoKey SubtleCrypto ' +
+      'Permissions PermissionStatus Geolocation GeolocationPosition GeolocationCoordinates GeolocationPositionError Clipboard ClipboardItem Notification PushManager PushSubscription PushSubscriptionOptions Bluetooth BluetoothDevice BluetoothUUID BluetoothRemoteGATTServer BluetoothRemoteGATTService BluetoothRemoteGATTCharacteristic BluetoothRemoteGATTDescriptor BluetoothCharacteristicProperties BluetoothAdvertisingEvent BluetoothManufacturerDataMap BluetoothServiceDataMap USB USBDevice USBConfiguration USBInterface USBAlternateInterface USBEndpoint USBInTransferResult USBOutTransferResult USBConnectionEvent USBIsochronousInTransferPacket USBIsochronousInTransferResult USBIsochronousOutTransferPacket USBIsochronousOutTransferResult Serial SerialPort HID HIDDevice HIDInputReportEvent HIDConnectionEvent NDEFReader NDEFRecord NDEFMessage NDEFReadingEvent ' +
+      'DeviceOrientationEvent DeviceMotionEvent DeviceMotionEventAcceleration DeviceMotionEventRotationRate Sensor SensorErrorEvent Accelerometer LinearAccelerationSensor GravitySensor Gyroscope Magnetometer AbsoluteOrientationSensor RelativeOrientationSensor OrientationSensor AmbientLightSensor Gamepad GamepadButton GamepadEvent GamepadHapticActuator ' +
+      'MediaDevices MediaDeviceInfo InputDeviceInfo MediaStream MediaStreamTrack MediaStreamEvent MediaStreamTrackEvent MediaStreamTrackProcessor MediaStreamTrackGenerator MediaRecorder MediaRecorderErrorEvent BlobEvent MediaCapabilities MediaSession MediaMetadata MediaSource SourceBuffer SourceBufferList VideoPlaybackQuality TimeRanges TextTrack TextTrackList TextTrackCue TextTrackCueList TrackEvent VTTCue VTTRegion PictureInPictureWindow PictureInPictureEvent MediaError MediaQueryList ' +
+      'RTCPeerConnection webkitRTCPeerConnection RTCSessionDescription RTCIceCandidate RTCDataChannel RTCDataChannelEvent RTCError RTCErrorEvent RTCTrackEvent RTCRtpSender RTCRtpReceiver RTCRtpTransceiver RTCDtlsTransport RTCIceTransport RTCSctpTransport RTCStatsReport RTCPeerConnectionIceEvent RTCPeerConnectionIceErrorEvent RTCCertificate RTCDTMFSender RTCDTMFToneChangeEvent RTCEncodedAudioFrame RTCEncodedVideoFrame RTCRtpScriptTransform ' +
+      'AudioContext webkitAudioContext OfflineAudioContext BaseAudioContext AudioNode AudioParam AudioParamMap AudioBuffer AudioBufferSourceNode AudioDestinationNode AudioListener AudioProcessingEvent AudioScheduledSourceNode AudioWorklet AudioWorkletNode AnalyserNode BiquadFilterNode ChannelMergerNode ChannelSplitterNode ConstantSourceNode ConvolverNode DelayNode DynamicsCompressorNode GainNode IIRFilterNode MediaElementAudioSourceNode MediaStreamAudioDestinationNode MediaStreamAudioSourceNode OscillatorNode PannerNode PeriodicWave ScriptProcessorNode StereoPannerNode WaveShaperNode OfflineAudioCompletionEvent ' +
+      'SpeechSynthesis SpeechSynthesisUtterance SpeechSynthesisVoice SpeechSynthesisEvent SpeechSynthesisErrorEvent SpeechRecognition SpeechRecognitionEvent SpeechRecognitionErrorEvent SpeechRecognitionResult SpeechRecognitionResultList SpeechRecognitionAlternative SpeechGrammar SpeechGrammarList webkitSpeechRecognition webkitSpeechRecognitionEvent webkitSpeechRecognitionError webkitSpeechGrammar webkitSpeechGrammarList ' +
+      'CanvasRenderingContext2D CanvasGradient CanvasPattern CanvasCaptureMediaStreamTrack ImageData ImageBitmap ImageBitmapRenderingContext OffscreenCanvas OffscreenCanvasRenderingContext2D Path2D TextMetrics WebGLRenderingContext WebGL2RenderingContext WebGLActiveInfo WebGLBuffer WebGLContextEvent WebGLFramebuffer WebGLProgram WebGLQuery WebGLRenderbuffer WebGLSampler WebGLShader WebGLShaderPrecisionFormat WebGLSync WebGLTexture WebGLTransformFeedback WebGLUniformLocation WebGLVertexArrayObject ' +
+      'Performance PerformanceEntry PerformanceMark PerformanceMeasure PerformanceObserver PerformanceObserverEntryList PerformanceNavigation PerformanceNavigationTiming PerformanceResourceTiming PerformanceTiming PerformancePaintTiming PerformanceEventTiming PerformanceLongTaskTiming TaskAttributionTiming LargestContentfulPaint LayoutShift LayoutShiftAttribution VisibilityStateEntry ' +
+      'Animation AnimationEffect AnimationTimeline DocumentTimeline KeyframeEffect AnimationPlaybackEvent ScrollTimeline ViewTimeline FontFace FontFaceSet FontFaceSetLoadEvent FontFaceSetLoadEvent ' +
+      'TrustedHTML TrustedScript TrustedScriptURL TrustedTypePolicy TrustedTypePolicyFactory TrustedTypePolicyFactory CookieStore CookieStoreManager CookieChangeEvent WakeLock WakeLockSentinel CredentialsContainer Credential PasswordCredential FederatedCredential PublicKeyCredential AuthenticatorResponse AuthenticatorAttestationResponse AuthenticatorAssertionResponse PaymentRequest PaymentResponse PaymentAddress PaymentRequestUpdateEvent PaymentMethodChangeEvent ' +
+      'ReportingObserver Report ReportBody DeprecationReportBody InterventionReportBody Lock LockManager Scheduler TaskController TaskSignal TaskPriorityChangeEvent NavigationPreloadManager LaunchQueue LaunchParams Scheduling Sanitizer ViewTransition CloseWatcher NotRestoredReasons NotRestoredReasonDetails ' +
+      'GPU GPUAdapter GPUAdapterInfo GPUDevice GPUQueue GPUBuffer GPUTexture GPUTextureView GPUSampler GPUShaderModule GPUCompilationInfo GPUCompilationMessage GPUBindGroup GPUBindGroupLayout GPUPipelineLayout GPUComputePipeline GPURenderPipeline GPUCommandEncoder GPUCommandBuffer GPUComputePassEncoder GPURenderPassEncoder GPURenderBundleEncoder GPURenderBundle GPUQuerySet GPUCanvasContext GPUError GPUValidationError GPUOutOfMemoryError GPUInternalError GPUUncapturedErrorEvent GPUDeviceLostInfo GPUExternalTexture GPUBufferUsage GPUTextureUsage GPUShaderStage GPUMapMode GPUColorWrite ' +
+      'VideoFrame AudioData VideoEncoder VideoDecoder AudioEncoder AudioDecoder EncodedVideoChunk EncodedAudioChunk ImageDecoder ImageTrack ImageTrackList WebTransport WebTransportBidirectionalStream WebTransportDatagramDuplexStream WebTransportError'
+    ).split(/\s+/);
+    // Additional browser names observed in a Chromium 153 desktop reference.
+    // Browser-tool injections are deliberately excluded from this baseline.
+    common = common.concat('AnimationTrigger AsyncDisposableStack AudioPlaybackStats AudioSinkInfo BackgroundFetchManager BackgroundFetchRecord BackgroundFetchRegistration BarcodeDetector BatteryManager BeforeInstallPromptEvent BrowserCaptureMediaStreamTrack CSPViolationReportBody CSSAnimation CSSFontFeatureValuesRule CSSFunctionDeclarations CSSFunctionDescriptors CSSFunctionRule CSSImageValue CSSMarginRule CSSNumericArray CSSPositionTryDescriptors CSSPositionValue CSSPseudoElement CSSTransition CSSViewTransitionRule CaptureController CaretPosition ChapterInformation CharacterBoundsUpdateEvent ClipboardChangeEvent CommandEvent ContentVisibilityAutoStateChangeEvent CrashReportContext CreateMonitor CropTarget CustomStateSet DOMError DataTransfer DataTransferItem DataTransferItemList DelegatedInkTrailPresenter DevicePosture DigitalCredential DisposableStack DocumentPictureInPicture DocumentPictureInPictureEvent EditContext ElementInternals EventCounts External EyeDropper FeaturePolicy Fence FencedFrameConfig FetchLaterResult FontData FormDataEvent FragmentDirective GPUPipelineError GPUSupportedFeatures GPUSupportedLimits HTMLAllCollection HTMLCameraElement HTMLFencedFrameElement HTMLGeolocationElement HTMLMicrophoneElement HTMLSelectedContentElement HTMLUserMediaElement Highlight HighlightRegistry IDBRecord IdentityCredential IdentityCredentialError IdentityProvider IdleDeadline IdleDetector ImageCapture Ink InputDeviceCapabilities IntegrityViolationReportBody InteractionContentfulPaint InterestEvent Keyboard KeyboardLayoutMap LanguageDetector LanguageModel MIDIAccess MIDIConnectionEvent MIDIInput MIDIInputMap MIDIMessageEvent MIDIOutput MIDIOutputMap MIDIPort MathMLElement MediaEncryptedEvent MediaKeyMessageEvent MediaKeySession MediaKeyStatusMap MediaKeySystemAccess MediaKeys MediaSourceHandle MediaStreamTrackAudioStats MediaStreamTrackVideoStats MimeType MimeTypeArray NavigationActivation NavigationDestination NavigationPrecommitController NavigatorLogin NavigatorManagedData NodeFilter NodeRange OTPCredential Observable OpaqueRange Origin OverconstrainedError PageRevealEvent PageSwapEvent PaymentManager PerformanceElementTiming PerformanceLongAnimationFrameTiming PerformanceScriptTiming PerformanceServerTiming PerformanceSoftNavigation PerformanceTimingConfidence PeriodicSyncManager PermissionsPolicy Plugin PluginArray Presentation PresentationAvailability PresentationConnection PresentationConnectionAvailableEvent PresentationConnectionCloseEvent PresentationConnectionList PresentationReceiver PresentationRequest PressureObserver PressureRecord Profiler ProtectedAudience QuotaExceededError RadioNodeList RemotePlayback RestrictionTarget SVGAElement SVGAnimateElement SVGAnimateMotionElement SVGAnimateTransformElement SVGAnimationElement SVGClipPathElement SVGComponentTransferFunctionElement SVGDescElement SVGFEBlendElement SVGFEColorMatrixElement SVGFEComponentTransferElement SVGFECompositeElement SVGFEConvolveMatrixElement SVGFEDiffuseLightingElement SVGFEDisplacementMapElement SVGFEDistantLightElement SVGFEDropShadowElement SVGFEFloodElement SVGFEFuncAElement SVGFEFuncBElement SVGFEFuncGElement SVGFEFuncRElement SVGFEGaussianBlurElement SVGFEImageElement SVGFEMergeElement SVGFEMergeNodeElement SVGFEMorphologyElement SVGFEOffsetElement SVGFEPointLightElement SVGFESpecularLightingElement SVGFESpotLightElement SVGFETileElement SVGFETurbulenceElement SVGFilterElement SVGGradientElement SVGLinearGradientElement SVGMPathElement SVGMarkerElement SVGMaskElement SVGMetadataElement SVGPatternElement SVGRadialGradientElement SVGScriptElement SVGSetElement SVGStopElement SVGStringList SVGStyleElement SVGSwitchElement SVGTitleElement SVGViewElement ScreenDetailed ScreenDetails SnapEvent SpeechRecognitionPhrase StorageBucket StorageBucketManager Subscriber Summarizer SuppressedError SyncManager Temporal TextEvent TextFormat TextFormatUpdateEvent TextUpdateEvent TimelineTrigger TimelineTriggerRange TimelineTriggerRangeList Translator UserActivation ValidityState VideoColorSpace ViewTransitionTypeSet Viewport VirtualKeyboard VirtualKeyboardGeometryChangeEvent WGSLLanguageFeatures WebGLObject WebKitMutationObserver WebSocketError WindowControlsOverlay WindowControlsOverlayGeometryChangeEvent XRAnchor XRAnchorSet XRBoundedReferenceSpace XRCPUDepthInformation XRCamera XRCompositionLayer XRCubeLayer XRCylinderLayer XRDOMOverlayState XRDepthInformation XREquirectLayer XRFrame XRHand XRHitTestResult XRHitTestSource XRInputSource XRInputSourceArray XRInputSourceEvent XRInputSourcesChangeEvent XRJointPose XRJointSpace XRLayer XRLayerEvent XRLightEstimate XRLightProbe XRPlane XRPlaneSet XRPose XRProjectionLayer XRQuadLayer XRRay XRReferenceSpace XRReferenceSpaceEvent XRRenderState XRRigidTransform XRSession XRSessionEvent XRSpace XRSubImage XRSystem XRTransientInputHitTestResult XRTransientInputHitTestSource XRView XRViewerPose XRViewport XRVisibilityMaskChangeEvent XRWebGLBinding XRWebGLDepthInformation XRWebGLLayer XRWebGLSubImage crashReport fetchLater getScreenDetails offscreenBuffering onappinstalled onbeforeinstallprompt onbeforexrselect oncommand oncontentvisibilityautostatechange ongamepadconnected ongamepaddisconnected onscrollsnapchange onscrollsnapchanging queryLocalFonts showDirectoryPicker showOpenFilePicker showSaveFilePicker styleMedia viewport webkitMediaStream webkitURL'.split(' '));
+    var baseline = Object.create(null);
+    common.forEach(function (name) { baseline[name] = true; });
+    ('abort afterprint animationcancel animationend animationiteration animationstart auxclick beforeinput beforematch beforeprint beforetoggle beforeunload blur cancel canplay canplaythrough change click close contextlost contextmenu contextrestored copy cuechange cut dblclick devicemotion deviceorientation deviceorientationabsolute drag dragend dragenter dragleave dragover dragstart drop durationchange emptied ended error focus formdata gotpointercapture hashchange input invalid keydown keypress keyup languagechange load loadeddata loadedmetadata loadstart lostpointercapture message messageerror mousedown mouseenter mouseleave mousemove mouseout mouseover mouseup mousewheel offline online pagehide pagereveal pageshow pageswap paste pause play playing pointercancel pointerdown pointerenter pointerleave pointermove pointerout pointerover pointerrawupdate pointerup popstate progress ratechange rejectionhandled reset resize scroll scrollend search securitypolicyviolation seeked seeking select selectionchange selectstart slotchange stalled storage submit suspend timeupdate toggle touchcancel touchend touchmove touchstart transitioncancel transitionend transitionrun transitionstart unhandledrejection unload volumechange waiting webkitanimationend webkitanimationiteration webkitanimationstart webkittransitionend wheel').split(' ').forEach(function (name) { baseline['on' + name] = true; });
+    var limits = { candidates: 150, properties: 180, prototypeDepth: 3, errors: 500, observations: 100 };
+    var output;
+    function fresh() { output = { errors: [], omittedErrors: 0, customProtocols: { observed: [], knownHints: ['xpeng://', 'xmart://', 'vehicle://', 'car://'], methodNameHints: [], note: 'Hints are unverified. No schemes are opened and no native methods are called.' } }; return output; }
+    function attempt(path, operation) {
+      try { return { ok: true, value: operation() }; }
+      catch (e) {
+        // Do not stringify an arbitrary thrown object: toString/message may be native getters.
+        var message = typeof e === 'string' ? e : 'Reflection threw; error object not evaluated.';
+        try { var d = e && descriptor(e, 'message'); if (d && typeof d.value === 'string') message = d.value; } catch (ignored) { /* hostile exception */ }
+        if (output.errors.length < limits.errors) output.errors.push({ path: path, message: message }); else output.omittedErrors++;
+        return { ok: false };
+      }
+    }
+    function objectLike(value) { return value !== null && (typeof value === 'object' || typeof value === 'function'); }
+    function lookup(object, key, path) {
+      var current = object, seen = [];
+      for (var depth = 0; objectLike(current) && depth < 8; depth++) {
+        if (seen.indexOf(current) >= 0) break;
+        seen.push(current);
+        var d = attempt(path, function () { return descriptor(current, key); });
+        if (!d.ok) return { status: 'ERROR' };
+        if (d.value) return { status: 'FOUND', descriptor: d.value, depth: depth };
+        var p = attempt(path + '.[[Prototype]]', function () { return prototype(current); });
+        if (!p.ok) return { status: 'ERROR' };
+        current = p.value;
+      }
+      return { status: objectLike(current) ? 'UNKNOWN' : 'NOT FOUND' };
+    }
+    function observeString(value, path) {
+      if (typeof value !== 'string' || output.customProtocols.observed.length >= limits.observations) return;
+      // Only literal URL-like prefixes. Do not crawl nested objects or function bodies.
+      var matches = value.slice(0, 4096).match(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*/gi) || [];
+      matches.forEach(function (url) {
+        var scheme = url.split(':')[0].toLowerCase();
+        if (/^(https?|wss?|ftp|file|chrome|chrome-extension|moz-extension)$/.test(scheme)) return;
+        if (output.customProtocols.observed.length < limits.observations) output.customProtocols.observed.push({ scheme: scheme, source: path, example: url.slice(0, 300) });
+      });
+    }
+    function describe(d, path) {
+      if (!hasOwn.call(d, 'value')) return { kind: 'accessor', getter: typeof d.get === 'function', setter: typeof d.set === 'function', note: 'Not evaluated' };
+      var value = d.value, type = value === null ? 'null' : typeof value;
+      var detail = { kind: type, writable: !!d.writable };
+      if (type === 'function') {
+        var fnName = attempt(path + '.name', function () { return descriptor(value, 'name'); });
+        var arity = attempt(path + '.length', function () { return descriptor(value, 'length'); });
+        detail.name = fnName.ok && fnName.value && typeof fnName.value.value === 'string' ? fnName.value.value : '(not exposed)';
+        detail.declaredArgumentCount = arity.ok && arity.value && typeof arity.value.value === 'number' ? arity.value.value : null;
+        detail.note = 'Not invoked. Arity is metadata, not a verified signature.';
+        if (/url|scheme|protocol|launch|intent/i.test(path) && output.customProtocols.methodNameHints.length < limits.observations) output.customProtocols.methodNameHints.push(path);
+      } else if (type === 'string') {
+        detail.value = value.slice(0, 400); detail.truncated = value.length > 400; observeString(value, path);
+      } else if (type === 'boolean' || type === 'number' || type === 'null') detail.value = value;
+      return detail;
+    }
+    function propertyList(value, path) {
+      var names = attempt(path + '.ownPropertyNames', function () { return own(value); });
+      if (!names.ok) return { status: 'ERROR', names: [], properties: [] };
+      return {
+        status: 'PASS', names: names.value, omittedDetails: Math.max(0, names.value.length - limits.properties),
+        properties: names.value.slice(0, limits.properties).map(function (key) {
+          var d = attempt(path + '.' + key, function () { return descriptor(value, key); });
+          return { name: key, detail: d.ok && d.value ? describe(d.value, path + '.' + key) : { kind: 'ERROR' } };
+        })
+      };
+    }
+    function inspect(value, path) {
+      var errorStart = output.errors.length;
+      var result = { type: value === null ? 'null' : typeof value, constructorName: null, own: null, prototypes: [] };
+      if (!objectLike(value)) return result;
+      var ctor = lookup(value, 'constructor', path + '.constructor');
+      if (ctor.descriptor && hasOwn.call(ctor.descriptor, 'value') && typeof ctor.descriptor.value === 'function') {
+        var cd = attempt(path + '.constructor.name', function () { return descriptor(ctor.descriptor.value, 'name'); });
+        if (cd.ok && cd.value && typeof cd.value.value === 'string') result.constructorName = cd.value.value;
+      } else if (ctor.descriptor) result.constructorName = '(accessor skipped)';
+      result.own = propertyList(value, path);
+      var current = value, seen = [value];
+      for (var depth = 1; depth <= limits.prototypeDepth; depth++) {
+        var p = attempt(path + '.[[Prototype:' + depth + ']]', function () { return prototype(current); });
+        if (!p.ok || !p.value || seen.indexOf(p.value) >= 0) break;
+        current = p.value; seen.push(current);
+        if (current === Object.prototype || current === Function.prototype) { result.prototypeStop = 'Common Object/Function prototype'; break; }
+        result.prototypes.push({ depth: depth, properties: propertyList(current, path + '.[[Prototype:' + depth + ']]') });
+        if (depth === limits.prototypeDepth) result.prototypeStop = 'Depth limit reached';
+      }
+      result.status = output.errors.length > errorStart ? 'ERROR' : 'PASS';
+      return result;
+    }
+    function inspectGlobal(name, reasons) {
+      var found = lookup(window, name, 'window.' + name);
+      var row = { name: name, status: found.status, explicitCheck: explicit.indexOf(name) >= 0, reasons: reasons };
+      if (!found.descriptor) return row;
+      row.property = describe(found.descriptor, 'window.' + name);
+      if (hasOwn.call(found.descriptor, 'value')) {
+        row.typeof = typeof found.descriptor.value;
+        if (found.descriptor.value === undefined || found.descriptor.value === null) row.status = 'NOT FOUND';
+        else row.introspection = inspect(found.descriptor.value, 'window.' + name);
+        if (row.introspection && row.introspection.status === 'ERROR') row.status = 'ERROR';
+      } else row.typeof = 'unknown (accessor not evaluated)';
+      return row;
+    }
+    function readWebkit() {
+      var wk = lookup(window, 'webkit', 'window.webkit');
+      var result = { status: wk.status, handlerNames: [], handlers: [], note: '' };
+      if (!wk.descriptor) return result;
+      if (!hasOwn.call(wk.descriptor, 'value')) { result.note = 'webkit is an accessor; skipped.'; return result; }
+      if (!objectLike(wk.descriptor.value)) { result.status = 'NOT FOUND'; return result; }
+      var mh = lookup(wk.descriptor.value, 'messageHandlers', 'window.webkit.messageHandlers');
+      result.status = mh.status;
+      if (!mh.descriptor) return result;
+      if (!hasOwn.call(mh.descriptor, 'value')) { result.note = 'messageHandlers is an accessor; skipped. Names cannot be safely enumerated.'; return result; }
+      if (!objectLike(mh.descriptor.value)) { result.status = 'NOT FOUND'; return result; }
+      result.introspection = inspect(mh.descriptor.value, 'window.webkit.messageHandlers');
+      result.handlerNames = result.introspection.own.names.slice();
+      result.introspection.prototypes.forEach(function (level) { level.properties.names.forEach(function (name) { if (!hasOwn.call(Object.prototype, name) && result.handlerNames.indexOf(name) < 0) result.handlerNames.push(name); }); });
+      result.handlers = result.handlerNames.slice(0, limits.properties).map(function (name) {
+        var h = lookup(mh.descriptor.value, name, 'window.webkit.messageHandlers.' + name);
+        var row = { name: name, status: h.status };
+        if (h.descriptor) {
+          row.property = describe(h.descriptor, 'window.webkit.messageHandlers.' + name);
+          if (hasOwn.call(h.descriptor, 'value')) row.introspection = inspect(h.descriptor.value, 'window.webkit.messageHandlers.' + name);
+        }
+        return row;
+      });
+      result.status = result.introspection.status === 'ERROR' ? 'ERROR' : 'FOUND';
+      result.note = 'Names and descriptors only. No postMessage or handler functions called.';
+      return result;
+    }
+    function inspectNavigator() {
+      var result = { values: {}, highlights: [], structure: inspect(navigator, 'navigator') };
+      // Known, read-only browser metadata getters are the only allowlisted reads.
+      // Unknown navigator properties are reflected above, never evaluated.
+      ['userAgent', 'platform', 'vendor', 'language', 'languages', 'hardwareConcurrency', 'deviceMemory', 'maxTouchPoints'].forEach(function (key) {
+        var value = attempt('navigator.' + key + ' (standard metadata)', function () { return navigator[key]; });
+        if (!value.ok) result.values[key] = { status: 'ERROR' };
+        else if (value.value === undefined) result.values[key] = { status: 'NOT FOUND' };
+        else if (key === 'languages') {
+          var copy = [];
+          var isArray = attempt('navigator.languages.arrayCheck', function () { return Array.isArray(value.value); });
+          if (isArray.ok && isArray.value) {
+            var list = attempt('navigator.languages.names', function () { return own(value.value); });
+            if (list.ok) list.value.filter(function (name) { return /^\d+$/.test(name); }).slice(0, 80).forEach(function (name) {
+              var item = attempt('navigator.languages.' + name, function () { return descriptor(value.value, name); });
+              if (item.ok && item.value && typeof item.value.value === 'string') copy.push(item.value.value);
+            });
+          }
+          result.values[key] = copy;
+        } else if (typeof value.value === 'string' || typeof value.value === 'number' || typeof value.value === 'boolean' || value.value === null) result.values[key] = value.value;
+        else result.values[key] = { status: 'FOUND', note: 'Unexpected object; not evaluated' };
+        if (typeof value.value === 'string' && /xpeng|xmart|xpilot|android|\bwv\b/i.test(value.value)) result.highlights.push({ property: key, value: value.value });
+      });
+      result.nativeLookingProperties = [];
+      [result.structure.own].concat(result.structure.prototypes.map(function (p) { return p.properties; })).forEach(function (level) {
+        level.names.forEach(function (name) { if (nativePattern.test(name) && result.nativeLookingProperties.indexOf(name) < 0) result.nativeLookingProperties.push(name); });
+      });
+      return result;
+    }
+    function deviceAPIs() {
+      var checks = [
+        ['Web Bluetooth', navigator, 'bluetooth'], ['WebUSB', navigator, 'usb'], ['Web Serial', navigator, 'serial'], ['Web NFC', window, 'NDEFReader'], ['Web HID', navigator, 'hid'],
+        ['Geolocation', navigator, 'geolocation'], ['Device Orientation', window, 'DeviceOrientationEvent'], ['Device Motion', window, 'DeviceMotionEvent'], ['MediaDevices', navigator, 'mediaDevices'],
+        ['WebSocket', window, 'WebSocket'], ['Service Workers', navigator, 'serviceWorker'], ['IndexedDB', window, 'indexedDB'], ['localStorage', window, 'localStorage'], ['sessionStorage', window, 'sessionStorage'], ['Clipboard API', navigator, 'clipboard'], ['Permissions API', navigator, 'permissions']
+      ];
+      return checks.map(function (check) {
+        var d = lookup(check[1], check[2], check[0]);
+        var result = { name: check[0], property: check[2], status: d.status, note: 'Presence only; usability and permissions not tested.' };
+        if (d.descriptor) {
+          result.kind = hasOwn.call(d.descriptor, 'value') ? typeof d.descriptor.value : 'accessor (not evaluated)';
+          if (hasOwn.call(d.descriptor, 'value') && d.descriptor.value == null) result.status = 'NOT FOUND';
+        }
+        return result;
+      });
+    }
+    function protocols() {
+      var links = attempt('document.links', function () { return document.querySelectorAll('a[href], area[href]'); });
+      if (!links.ok) return;
+      for (var i = 0; i < links.value.length && i < 300; i++) {
+        var href = attempt('link[' + i + '].href', function () { return links.value[i].getAttribute('href'); });
+        if (href.ok && typeof href.value === 'string') {
+          observeString(href.value, 'link[' + i + ']');
+          var match = /^([a-z][a-z0-9+.-]*):([^/]|$)/i.exec(href.value);
+          if (match && !/^(https?|wss?|ftp|file|data|blob|javascript|mailto|tel|about)$/.test(match[1].toLowerCase()) && output.customProtocols.observed.length < limits.observations) output.customProtocols.observed.push({ scheme: match[1].toLowerCase(), source: 'link[' + i + ']', example: href.value.slice(0, 300) });
+        }
+      }
+    }
+    function collect() {
+      fresh();
+      output.timestamp = new Date().toISOString(); output.url = location.href;
+      output.baseline = { version: 'common-chromium-2026-09-v1', note: 'Curated and incomplete. Missing names may be standard browser APIs, page scripts, element IDs, extensions, or native injections. No name alone proves a vehicle API.' };
+      output.limits = limits;
+      output.safety = 'Unknown accessors and methods are never called. Standard navigator metadata getters are read explicitly. Reflection may execute Proxy/host traps; JavaScript cannot guarantee those are side-effect-free. No native messages, permissions, storage writes, network probes, or scheme launches.';
+      var names = attempt('window.ownPropertyNames', function () { return own(window); });
+      output.globalEnumerationStatus = names.ok ? 'PASS' : 'ERROR';
+      output.globalNames = names.ok ? names.value.sort() : [];
+      output.potentialNativeGlobals = [];
+      var candidates = explicit.slice();
+      output.globalNames.forEach(function (name) {
+        var reasons = [];
+        if (nativePattern.test(name) || explicit.indexOf(name) >= 0 && name !== 'chrome' && name !== 'external') reasons.push('Native/bridge naming clue');
+        if (!baseline[name]) reasons.push('Outside curated Chromium baseline');
+        // IDs exposed as Window named properties are page-owned, not bridge evidence.
+        var pageElement = attempt('document.getElementById(' + name + ')', function () { return document.getElementById(name); });
+        if (pageElement.ok && pageElement.value) {
+          var named = attempt('window.' + name + ' (element identity)', function () { return descriptor(window, name); });
+          if (named.ok && named.value && hasOwn.call(named.value, 'value') && named.value.value === pageElement.value) reasons = ['Page element ID (not native evidence)'];
+        }
+        if (reasons.length && reasons[0] !== 'Page element ID (not native evidence)') {
+          output.potentialNativeGlobals.push({ name: name, reasons: reasons });
+          if (candidates.indexOf(name) < 0) candidates.push(name);
+        }
+      });
+      output.potentialNativeGlobals.sort(function (a, b) { return (b.reasons[0] === 'Native/bridge naming clue' ? 1 : 0) - (a.reasons[0] === 'Native/bridge naming clue' ? 1 : 0); });
+      candidates.sort(function (a, b) { return (explicit.indexOf(b) >= 0 ? 2 : nativePattern.test(b) ? 1 : 0) - (explicit.indexOf(a) >= 0 ? 2 : nativePattern.test(a) ? 1 : 0); });
+      output.omittedObjectDetails = Math.max(0, candidates.length - limits.candidates);
+      output.objects = candidates.slice(0, limits.candidates).map(function (name) {
+        var anomaly = output.potentialNativeGlobals.filter(function (entry) { return entry.name === name; })[0];
+        return inspectGlobal(name, anomaly ? anomaly.reasons : ['Explicit common bridge/WebView name check']);
+      });
+      output.webkit = readWebkit(); output.navigator = inspectNavigator(); output.deviceAPIs = deviceAPIs();
+      output.userAgent = output.navigator.values.userAgent;
+      var ua = typeof output.userAgent === 'string' ? output.userAgent : '';
+      var version = /(?:Chrome|Chromium)\/([\d.]+)/.exec(ua);
+      var webview = /;\s*wv\b/i.test(ua) || /\bVersion\/4\.0\b.*\bChrome\//.test(ua) && /Android/i.test(ua);
+      output.androidWebView = {
+        androidUA: /Android/i.test(ua), xpengOrXmartUA: /xpeng|xmart|xpilot/i.test(ua),
+        chromiumFamily: !!version, reportedChromiumVersion: version ? version[1] : null, likelyAndroidWebView: webview,
+        note: 'UA heuristics only; browsers can omit or spoof these markers. chrome/webkit objects also occur in ordinary browsers.',
+        interfaceCandidates: output.objects.filter(function (entry) { return entry.status !== 'NOT FOUND' && nativePattern.test(entry.name); }).map(function (entry) { return { name: entry.name, status: entry.status, type: entry.typeof }; })
+      };
+      protocols();
+      output.status = output.errors.length || output.omittedErrors ? 'ERROR' : 'PASS';
+      return output;
+    }
+    function legacyBridgeScan() {
+      fresh();
+      var names = attempt('window.ownPropertyNames', function () { return own(window); });
+      var candidates = explicit.slice();
+      if (names.ok) names.value.forEach(function (name) { if (nativePattern.test(name) && candidates.indexOf(name) < 0) candidates.push(name); });
+      return { objects: candidates.slice(0, limits.candidates).map(function (name) { return inspectGlobal(name, []); }).filter(function (row) { return row.status !== 'NOT FOUND'; }), errors: output.errors };
+    }
+    return { collect: collect, legacyBridgeScan: legacyBridgeScan };
+  }
+  var nativeDiscovery = createNativeDiscovery();
+  function nativeDetails(parent, title, value) {
+    var details = document.createElement('details'), summary = document.createElement('summary'), content = document.createElement('pre');
+    summary.textContent = title; content.textContent = JSON.stringify(value, null, 2);
+    details.appendChild(summary); details.appendChild(content); parent.appendChild(details);
+  }
+  function renderNativeDiscovery(data) {
+    var target = $('native-results'); target.textContent = '';
+    show(target, 'Discovery · ' + data.timestamp, data.status + ' · ' + data.globalNames.length + ' globals · ' + data.potentialNativeGlobals.length + ' candidates · ' + data.errors.length + ' errors', data.status === 'PASS' ? 'yes' : 'maybe');
+    var heading = document.createElement('h3'); heading.textContent = 'Potential Native / Non-standard Globals'; target.appendChild(heading);
+    var hint = document.createElement('p'); hint.textContent = data.baseline.note; target.appendChild(hint);
+    var list = document.createElement('div'); list.className = 'grid'; target.appendChild(list);
+    if (!data.potentialNativeGlobals.length) show(list, 'Anomaly scan', 'NOT FOUND · No globals outside the baseline or matching native clues.');
+    data.potentialNativeGlobals.forEach(function (entry) { show(list, entry.name, 'FOUND · ' + entry.reasons.join('; '), 'maybe'); });
+    nativeDetails(target, 'Global inventory (' + data.globalNames.length + ')', data.globalNames);
+    var bridgeTitle = document.createElement('h3'); bridgeTitle.textContent = 'Bridge objects & callable metadata'; target.appendChild(bridgeTitle);
+    data.objects.forEach(function (entry) {
+      if (entry.status === 'NOT FOUND') return;
+      nativeDetails(target, entry.status + ' · window.' + entry.name + ' · ' + entry.typeof + (entry.property && entry.property.kind === 'function' ? ' · function (not invoked)' : ''), entry);
+    });
+    nativeDetails(target, 'Explicit checks · all results (including NOT FOUND)', data.objects.filter(function (entry) { return entry.explicitCheck; }));
+    show(target, 'WebKit / message handlers', data.webkit.status + ' · ' + (data.webkit.handlerNames.join(', ') || data.webkit.note || 'No accessible message handlers'));
+    nativeDetails(target, 'Message-handler details', data.webkit);
+    show(target, 'Android / WebView indicators', (data.androidWebView.likelyAndroidWebView ? 'FOUND · Likely Android WebView' : 'NOT FOUND · No Android WebView UA markers') + (data.androidWebView.reportedChromiumVersion ? ' · Chromium ' + data.androidWebView.reportedChromiumVersion : ''));
+    nativeDetails(target, 'Android / WebView evidence', data.androidWebView);
+    nativeDetails(target, 'Navigator metadata & unusual properties', data.navigator);
+    var apiTitle = document.createElement('h3'); apiTitle.textContent = 'Browser / device API presence'; target.appendChild(apiTitle);
+    var apis = document.createElement('div'); apis.className = 'grid'; target.appendChild(apis);
+    data.deviceAPIs.forEach(function (api) { show(apis, api.name, api.status + (api.kind ? ' · ' + api.kind : ''), api.status === 'FOUND' ? 'yes' : 'maybe'); });
+    show(target, 'Custom protocols / URL schemes', data.customProtocols.observed.length ? 'FOUND · ' + data.customProtocols.observed.map(function (entry) { return entry.scheme + '://'; }).filter(function (s, i, a) { return a.indexOf(s) === i; }).join(', ') : 'NOT FOUND · No custom schemes observed');
+    nativeDetails(target, 'Observed schemes, API name clues & unverified hints (never opened)', data.customProtocols);
+    nativeDetails(target, 'Introspection errors (' + data.errors.length + ') & scan limits', { errors: data.errors, omittedErrors: data.omittedErrors, limits: data.limits, omittedObjectDetails: data.omittedObjectDetails, safety: data.safety });
+  }
+  function runNativeDiscovery() {
+    $('run-native').disabled = true;
+    $('native-status').textContent = 'Running passive discovery…';
+    try {
+      report.nativeDiscovery = nativeDiscovery.collect();
+      renderNativeDiscovery(report.nativeDiscovery);
+      $('native-status').textContent = report.nativeDiscovery.status + ' · Discovery complete. FOUND means exposed, not verified vehicle control.';
+      log('XPENG Native API Discovery complete');
+    } catch (e) {
+      // Avoid coercing unknown exceptions from a host object.
+      report.nativeDiscovery = { status: 'ERROR', timestamp: new Date().toISOString(), errors: [{ path: 'discovery', message: 'Discovery could not complete; unexpected host or rendering error.' }] };
+      $('native-status').textContent = 'ERROR · Discovery could not complete. Copy the report for analysis.';
+    }
+    $('run-native').disabled = false;
+    if (!$('native-report-panel').hidden) $('native-full-report').value = JSON.stringify(report, null, 2);
+  }
+  $('run-native').addEventListener('click', runNativeDiscovery);
+  $('copy-full-report').addEventListener('click', function () {
+    if (!report.nativeDiscovery) runNativeDiscovery();
+    var text = JSON.stringify(report, null, 2);
+    $('native-report-panel').hidden = false; $('native-full-report').value = text;
+    function fallback() {
+      $('native-full-report').focus(); $('native-full-report').select();
+      $('native-status').textContent = 'Report ready below. Use the browser’s Copy command if automatic copying is unavailable.';
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { $('native-status').textContent = 'PASS · Full report copied. It is also available below.'; }, fallback);
+      else fallback();
+    } catch (e) { fallback(); }
+  });
+
   scan();
 }());
 </script>
