@@ -1,6 +1,6 @@
 # XPeng Browser Capability Tester
 
-Single-file browser diagnostics, hosted at <https://hamtiko.github.io/xpeng-browser-capability-tester/>. No build step or external JavaScript dependencies.
+Browser diagnostics, hosted at <https://hamtiko.github.io/xpeng-browser-capability-tester/>. No build step or external JavaScript dependencies.
 
 ## Native API discovery
 
@@ -41,3 +41,24 @@ node --test tests/native-discovery.test.cjs
 The suite executes the actual page script, covering automatic and manual discovery, hostile getters, throwing/revoked proxies, conversion hooks, native methods and handlers, inherited properties, API states, custom schemes, report copying, rescans, and bounded cyclic/large objects.
 
 Serve `index.html` with any static server to inspect it locally. GitHub Pages uses the root of `main`.
+
+## Extended functional tests
+
+The **Extended functional tests** section adds continuous location (including speed and heading), persistence markers, looping audio, voices and speech synthesis, microphone-only acquisition, speech recognition, offline caching, background timer observations, configurable secure WebSocket echo, Bluetooth GATT service discovery, notification display, fullscreen, screen wake lock, Media Session controls, a small WebGL timing test, codec advertisements, local video playback, touch tracking, file selection, sample download, and install-prompt availability.
+
+Tests run only on individual button presses. **Stop all** releases active test resources. Hardware and browser prompts cannot always be dismissed by script. Bluetooth only enumerates authorized services of a selected accessory; it never reads or writes characteristics. Recognition may use the browser vendor's speech service. The echo test sends a generated token to the displayed public endpoint. File selection/video stay local; no upload server is used.
+
+All results and manual observations appear in the existing JSON export under `extended.*`. Results are held in memory: export before reload. The persistence marker survives separately until explicitly cleared. Record audible sound, notification visibility, steering-wheel events, and the type of restart in the manual observation controls.
+
+Offline testing explicitly registers `functional-test-sw.js` and caches the app shell. Wait for "cache ready", reload online once, disconnect internet, and reload the same URL. **Remove offline cache** unregisters this test worker and deletes its cache; close all copies to release existing controllers. Cache/worker presence alone is not proof of offline reload success.
+
+The browser regression test requires Playwright and Chromium:
+
+```sh
+npm install
+npm test
+# Override CHROMIUM_PATH when Chromium is not at /usr/bin/chromium.
+```
+
+Browser tests verify opt-in behavior, location cleanup, microphone track cleanup, persistence, WebSocket echo reporting, JSON integration, and actual offline reload. Hardware outcomes still require testing in the car.
+

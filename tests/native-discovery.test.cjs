@@ -11,7 +11,7 @@ const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 function harness(configure = () => {}) {
   const elements = new Map();
   class Element {
-    constructor() { this.children = []; this.listeners = {}; this.value = ''; this.hidden = true; }
+    constructor() { this.children = []; this.listeners = {}; this.value = ''; this.hidden = true; this.parentNode = { after() {} }; }
     set textContent(value) { this.text = value; this.children = []; }
     get textContent() { return this.text || ''; }
     appendChild(child) { this.children.push(child); return child; }
@@ -37,7 +37,7 @@ function harness(configure = () => {}) {
     },
     location: { href: 'https://example.test/xpeng/', protocol: 'https:' },
     screen: { width: 1920, height: 1080 }, innerWidth: 1920, innerHeight: 1080,
-    console, setTimeout, clearTimeout
+    console, setTimeout, clearTimeout, addEventListener() {}
   };
   sandbox.window = sandbox;
   const context = { sandbox, navigator, elements, links };
@@ -184,3 +184,4 @@ test('large and cyclic objects are bounded, and explicit bridges are prioritized
   assert.equal(bridge.introspection.own.properties.length, 180);
   assert.equal(bridge.introspection.own.omittedDetails, 41);
 });
+
